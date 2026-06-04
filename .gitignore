@@ -1,0 +1,27 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Data outputs and model artifacts
+outputs/
+models/
+checkpoints/
+runs/
+wandb/
+
+# Spark and local runtime
+spark-warehouse/
+metastore_db/
+*.log
+
+# Environment
+.env
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

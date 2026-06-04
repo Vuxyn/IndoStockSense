@@ -1,0 +1,13 @@
+pyspark
+datasets
+transformers
+accelerate
+evaluate
+peft
+bitsandbytes
+scikit-learn
+pandas
+numpy
+matplotlib
+seaborn
+tqdm
