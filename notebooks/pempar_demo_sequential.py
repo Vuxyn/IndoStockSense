@@ -13,6 +13,8 @@
 # Run this cell in Google Colab.
 
 # %%
+!pip uninstall -y torchvision
+!pip install -q transformers "datasets>=2.20.0" accelerate evaluate peft "torchao>=0.16.0" scikit-learn pandas numpy matplotlib seaborn tqdm
 
 # %%
 import random
@@ -27,7 +29,7 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
 
 # %% [markdown]
-# ## 2. CUDA and Spark Check
+# ## 2. CUDA Check
 
 # %%
 try:
@@ -35,37 +37,12 @@ try:
 
     CUDA_AVAILABLE = torch.cuda.is_available()
     DEVICE = "cuda" if CUDA_AVAILABLE else "cpu"
-    
-    try:
-        import torchvision.io
-        if not hasattr(torchvision.io, 'VideoReader'):
-            torchvision.io.VideoReader = type('VideoReader', (object,), {})
-    except ImportError:
-        pass
-
 except ImportError:
     CUDA_AVAILABLE = False
     DEVICE = "cpu"
 
 print("CUDA available:", CUDA_AVAILABLE)
 print("Device:", DEVICE)
-
-# %%
-try:
-    from pyspark.sql import SparkSession
-
-    spark = (
-        SparkSession.builder
-        .appName("IndoStockSense-Pempar")
-        .master("local[2]")
-        .getOrCreate()
-    )
-    sc = spark.sparkContext
-    print("Spark version:", spark.version)
-except Exception as exc:
-    spark = None
-    sc = None
-    print("Spark is not ready:", exc)
 
 # %% [markdown]
 # ## 3. Global Configuration
@@ -170,56 +147,7 @@ print(f"Total Words: {total_words_seq}")
 print(f"Sentiment Distribution: {sentiment_dist_seq}")
 print(f"Sequential Processing Time: {time_seq:.4f} seconds\n")
 
-# %%
-print("--- PARALLEL DATA PROCESSING (PYSPARK) ---")
-time_par = None
-
-if sc is not None:
-    start_par = time.time()
-    
-    data_list = df[["text", "label", "label_id"]].to_dict("records")
-    
-    rdd = sc.parallelize(data_list, numSlices=NUM_SLICES)
-    
-    rdd_mapped = rdd.map(lambda row: {
-        "text": row["text"], 
-        "label": row["label"], 
-        "label_id": row["label_id"],
-        "clean_text": clean_text(row["text"])
-    })
-    
-    rdd_filtered = rdd_mapped.filter(lambda row: len(row["clean_text"].split()) >= 3)
-    
-    rdd_filtered.cache()
-    
-    total_words_par = rdd_filtered.map(lambda row: len(row["clean_text"].split())).reduce(lambda a, b: a + b)
-    
-    spark_df = spark.createDataFrame(rdd_filtered)
-    spark_df.createOrReplaceTempView("stock_news")
-    
-    query_result = spark.sql("""
-        SELECT label, COUNT(*) as count 
-        FROM stock_news 
-        GROUP BY label 
-        ORDER BY count DESC
-    """)
-    sentiment_dist_par = {row["label"]: row["count"] for row in query_result.collect()}
-    
-    processed_df = spark_df.toPandas()
-    
-    time_par = time.time() - start_par
-    
-    print(f"Total Words: {total_words_par}")
-    print(f"Sentiment Distribution: {sentiment_dist_par}")
-    print(f"Parallel Processing Time: {time_par:.4f} seconds")
-    
-    data_speedup = time_seq / time_par if time_par > 0 else 0
-    print(f"Data Processing Speedup: {data_speedup:.2f}x")
-    
-    df = processed_df
-else:
-    print("SparkContext is not available. Using sequential results.")
-    df = df_seq
+df = df_seq
 
 df[["text", "clean_text", "label"]].head()
 
@@ -502,7 +430,6 @@ population
 
 # %%
 SEQ_CACHE = {}
-PAR_CACHE = {}
 
 def get_cache_key(individual: dict) -> str:
     return str(sorted(individual.items()))
@@ -569,84 +496,16 @@ print(f"Sequential total time: {sequential_time:.2f}s")
 print("Overall best sequential result:", best_sequential)
 
 # %% [markdown]
-# ## 12. Parallel GA Evaluation with PySpark
-
-# %%
-def evaluate_population_parallel(sc, population: list[dict], num_slices: int = 4) -> list[dict]:
-    unique_to_evaluate = []
-
-    for ind in population:
-        key = get_cache_key(ind)
-        if key not in PAR_CACHE and ind not in unique_to_evaluate:
-            unique_to_evaluate.append(ind)
-
-    if unique_to_evaluate:
-        pop_rdd = sc.parallelize(unique_to_evaluate, numSlices=num_slices)
-        new_results = pop_rdd.map(lambda ind: evaluate_individual(ind, use_subset=True)).collect()
-
-        for res in new_results:
-            if "error" in res:
-                print(f"\n[PYSPARK WORKER ERROR for {res['individual']}]:\n{res['error']}\n")
-            PAR_CACHE[get_cache_key(res["individual"])] = res
-
-    cache_hits = len(population) - len(unique_to_evaluate)
-    print(f"  [Cache] {cache_hits}/{len(population)} cache hits "
-          f"({100*cache_hits/len(population):.0f}% saved) | "
-          f"PAR_CACHE size: {len(PAR_CACHE)}")
-
-    final_results = []
-    for ind in population:
-        key = get_cache_key(ind)
-        cached_result = PAR_CACHE[key].copy()
-        if ind not in unique_to_evaluate:
-            cached_result["elapsed"] = 0.0
-        final_results.append(cached_result)
-
-    return final_results
-
-
-if sc is not None:
-    start = time.time()
-    current_population_par = population.copy()
-    best_parallel = None
-    
-    print("Starting Parallel GA...")
-    for gen in range(GENERATIONS):
-        print(f"--- Generation {gen + 1}/{GENERATIONS} ---")
-        
-        evaluated = evaluate_population_parallel(sc, current_population_par, NUM_SLICES)
-        
-        gen_best = max(evaluated, key=lambda item: item["fitness"])
-        print(f"Best fitness this gen: {gen_best['fitness']:.4f}")
-        if best_parallel is None or gen_best["fitness"] > best_parallel["fitness"]:
-            best_parallel = gen_best
-            
-        if gen < GENERATIONS - 1:
-            current_population_par = next_generation(evaluated, search_space, POPULATION_SIZE)
-
-    parallel_time = time.time() - start
-    speedup = sequential_time / parallel_time if parallel_time > 0 else 0
-
-    print(f"Parallel total time: {parallel_time:.2f}s")
-    print(f"Speedup: {speedup:.2f}x")
-    print("Overall best parallel result:", best_parallel)
-else:
-    parallel_time = None
-    speedup = None
-    best_parallel = None
-    print("SparkContext is not available.")
-
-# %% [markdown]
-# ## 13. Final IndoBERT-LoRA Training & Top-3 Validation
+# ## 12. Final IndoBERT-LoRA Training & Top-3 Validation
 #
 # Top-3 hyperparameters from GA are trained on full data to validate
 # that proxy fitness (30% subset, 1 epoch) rankings hold on full data.
 # This mitigates the proxy fitness inconsistency risk.
 
 # %%
-best_evaluated = best_parallel if sc is not None else best_sequential
+best_evaluated = best_sequential
 
-active_cache = PAR_CACHE if sc is not None else SEQ_CACHE
+active_cache = SEQ_CACHE
 all_evaluated = sorted(active_cache.values(), key=lambda x: x["fitness"], reverse=True)
 
 top3_candidates = []
@@ -705,7 +564,7 @@ baseline_training_result = train_and_evaluate_indobert_lora(default_hyperparamet
 print("Baseline training result:", baseline_training_result)
 
 # %% [markdown]
-# ## 14. Evaluation Metrics & Speedup Visualization
+# ## 13. Evaluation Metrics
 
 # %%
 evaluation_summary = {
@@ -715,44 +574,13 @@ evaluation_summary = {
     "f1_weighted": final_training_result["fitness"],
     "baseline_f1_weighted": baseline_training_result["fitness"],
     "sequential_time": sequential_time,
-    "parallel_time": parallel_time,
-    "speedup": speedup,
 }
 
 print("Evaluation Summary:")
 print(evaluation_summary)
 
-# %%
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-sns.set_theme(style="whitegrid")
-
-if parallel_time is not None:
-    labels = ['Sequential GA', 'Parallel GA (PySpark)']
-    times = [sequential_time, parallel_time]
-
-    plt.figure(figsize=(8, 5))
-    bars = plt.bar(labels, times, color=['#e74c3c', '#2ecc71'], edgecolor='black')
-    plt.ylabel('Execution Time (Seconds)', fontsize=12)
-    plt.title('Performance Benchmark: Sequential vs Parallel GA', fontsize=14, fontweight='bold')
-
-    for bar in bars:
-        yval = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2, yval + (max(times)*0.02), 
-                 f'{yval:.1f} s', ha='center', va='bottom', fontweight='bold', fontsize=12)
-
-    plt.text(0.5, max(times)*0.85, f"Speedup: {speedup:.2f}x", ha='center', va='center', 
-             bbox=dict(facecolor='white', alpha=0.9, edgecolor='#2c3e50', boxstyle='round,pad=0.5'), 
-             fontsize=14, fontweight='bold', color='#2980b9')
-
-    plt.tight_layout()
-    plt.show()
-else:
-    print("Parallel execution was skipped, visualization not available.")
-
 # %% [markdown]
-# ## 15. Sentiment Inference Demo
+# ## 14. Sentiment Inference Demo
 
 # %%
 def predict_sentiment(text: str) -> dict:

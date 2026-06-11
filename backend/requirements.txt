@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-telegram-bot
+apscheduler
+beautifulsoup4
+requests
+supabase
+torch
+transformers
+peft
+pandas
+numpy
